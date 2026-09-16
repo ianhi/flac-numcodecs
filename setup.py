@@ -15,7 +15,11 @@ version = d['version']
 long_description = open("README.md").read()
 
 install_requires = open_requirements('requirements.txt')
-entry_points = {"numcodecs.codecs": ["flac = flac_numcodecs:Flac"]}
+entry_points = {
+    "numcodecs.codecs": ["flac = flac_numcodecs:Flac"],
+    # zarr v3 discovers codecs through its own entry point group
+    "zarr.codecs": ["flac = flac_numcodecs.zarr3:Flac"],
+}
 
 setup(
     name="flac_numcodecs",
@@ -27,6 +31,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/AllenNeuralDynamics/flac-numcodecs",
     install_requires=install_requires,
+    extras_require={"zarr": ["zarr>=3"]},
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

@@ -62,6 +62,35 @@ data = flac_codec.decode(frames)
 
 Complete streams are still decoded as before, so a codec configured this way handles both.
 
+### Zarr v3
+
+Zarr v3 has its own codec protocol and registry. Installing this package registers a v3
+codec under the name `flac`, so an array whose metadata names it is read with no import
+or registration by the user:
+
+```
+import zarr
+
+z = zarr.open_array("array.zarr", mode="r")  # "codecs": [{"name": "flac", "configuration": {...}}]
+data = z[:]
+```
+
+The configuration holds the same four parameters, and chunks may be either complete FLAC
+streams or bare runs of frames. To create such an array:
+
+```
+import zarr
+from flac_numcodecs.zarr3 import Flac
+
+z = zarr.create_array("array.zarr", shape=data.shape, chunks=(4096,), dtype="int16",
+                      compressors=[Flac(blocksize=4096, sample_rate=16000,
+                                        channels=1, bits_per_sample=16)])
+z[:] = data
+```
+
+The v3 codec requires `zarr>=3` (`pip install flac-numcodecs[zarr]`); the numcodecs codec
+above is unaffected by which version of Zarr, if any, is installed.
+
 **NOTE:** 
 In order to reload in zarr an array saved with the `Flac`, you just need to have the `flac_numcodecs` package
 installed.
