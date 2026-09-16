@@ -42,6 +42,26 @@ data_read = z[:]
 ```
 Available `**kwargs` can be browsed with: `Flac?`
 
+### Decoding headerless frames
+
+A buffer sliced out of the middle of a FLAC file is a run of complete frames with no
+`fLaC` magic and no `STREAMINFO` metadata block, which libFLAC refuses to decode. Give the
+codec the four stream parameters and it synthesises the missing header when it sees a
+buffer that does not start with the `fLaC` magic:
+
+```
+from flac_numcodecs import Flac
+
+# parameters of the stream the frames were taken from
+flac_codec = Flac(blocksize=4096, sample_rate=16000, channels=1, bits_per_sample=16)
+
+frames = ... # bytes covering whole frames, e.g. a byte range of a FLAC file
+
+data = flac_codec.decode(frames)
+```
+
+Complete streams are still decoded as before, so a codec configured this way handles both.
+
 **NOTE:** 
 In order to reload in zarr an array saved with the `Flac`, you just need to have the `flac_numcodecs` package
 installed.

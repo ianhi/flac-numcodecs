@@ -1,5 +1,6 @@
 from flac_numcodecs import Flac
 import numpy as np
+import numcodecs
 import zarr
 import pytest
 
@@ -118,6 +119,92 @@ def test_flac_zarr():
 
 
 
+def split_header(enc):
+    """Split a complete FLAC stream into its header (magic + metadata blocks) and its frames."""
+    assert enc[:4] == b"fLaC"
+    i = 4
+    while True:
+        is_last = enc[i] & 0x80
+        length = int.from_bytes(enc[i + 1:i + 4], "big")
+        i += 4 + length
+        if is_last:
+            break
+    return enc[:i], enc[i:]
+
+
+@pytest.mark.headerless
+def test_flac_headerless_roundtrip():
+    blocksize = 1000
+    data = make_noisy_sin_signals(shape=(10 * blocksize,), dtype="int16")
+
+    _, frames = split_header(Flac(blocksize=blocksize).encode(data))
+
+    cod = Flac(blocksize=blocksize, sample_rate=48000, channels=1, bits_per_sample=16)
+    dec = cod.decode(frames)
+    data_dec = np.frombuffer(dec, dtype=data.dtype)
+    assert np.all(data_dec == data)
+
+
+@pytest.mark.headerless
+def test_flac_headerless_partial_frames():
+    blocksize = 1000
+    nblocks = 10
+    data = make_noisy_sin_signals(shape=(nblocks * blocksize,), dtype="int16")
+
+    # frames are encoded independently, so the frames of an encoded prefix of the signal
+    # are a byte-prefix of the frames of the whole signal: that gives us frame boundaries
+    _, frames = split_header(Flac(blocksize=blocksize).encode(data))
+    offsets = {}
+    for nb in range(1, nblocks):
+        _, prefix_frames = split_header(Flac(blocksize=blocksize).encode(data[:nb * blocksize]))
+        assert frames.startswith(prefix_frames)
+        offsets[nb] = len(prefix_frames)
+
+    cod = Flac(blocksize=blocksize, sample_rate=48000, channels=1, bits_per_sample=16)
+
+    # a run of frames from the middle of the stream
+    dec = cod.decode(frames[offsets[3]:offsets[7]])
+    data_dec = np.frombuffer(dec, dtype=data.dtype)
+    assert np.all(data_dec == data[3 * blocksize:7 * blocksize])
+
+    # a run that includes the (possibly shorter) final frame
+    dec = cod.decode(frames[offsets[8]:])
+    data_dec = np.frombuffer(dec, dtype=data.dtype)
+    assert np.all(data_dec == data[8 * blocksize:])
+
+
+@pytest.mark.headerless
+def test_flac_headerless_codec_decodes_complete_stream():
+    blocksize = 1000
+    data = make_noisy_sin_signals(shape=(10 * blocksize,), dtype="int16")
+    enc = Flac(blocksize=blocksize).encode(data)
+
+    cod = Flac(blocksize=blocksize, sample_rate=48000, channels=1, bits_per_sample=16)
+    data_dec = np.frombuffer(cod.decode(enc), dtype=data.dtype)
+    assert np.all(data_dec == data)
+
+    # the default codec is unaffected by the headerless options
+    default_dec = np.frombuffer(Flac().decode(enc), dtype=data.dtype)
+    assert np.all(default_dec == data)
+
+
+@pytest.mark.headerless
+def test_flac_headerless_config():
+    cod = Flac(level=8, blocksize=1000, sample_rate=16000, channels=2, bits_per_sample=16)
+    assert numcodecs.get_codec(cod.get_config()).get_config() == cod.get_config()
+
+    default_config = Flac().get_config()
+    assert default_config["channels"] is None
+    assert numcodecs.get_codec(default_config).get_config() == default_config
+
+    with pytest.raises(ValueError):
+        Flac(channels=1, bits_per_sample=16)
+
+
 if __name__ == '__main__':
     test_flac_numcodecs()
     test_flac_zarr()
+    test_flac_headerless_roundtrip()
+    test_flac_headerless_partial_frames()
+    test_flac_headerless_codec_decodes_complete_stream()
+    test_flac_headerless_config()

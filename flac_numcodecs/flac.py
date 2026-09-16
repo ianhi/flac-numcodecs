@@ -9,11 +9,12 @@ Multi-channel data exceeding the number of channels that can be encoded by the c
 compression procedure.
 """
 from pathlib import Path
+import struct
 import numpy as np
 
 import numcodecs
 from numcodecs.abc import Codec
-from numcodecs.compat import ndarray_copy
+from numcodecs.compat import ndarray_copy, ensure_contiguous_ndarray
 
 from tempfile import TemporaryDirectory
 
@@ -173,6 +174,39 @@ class FlacNumpyDecoder(_Decoder):
         self.total_samples += num_samples
 
 
+FLAC_MAGIC = b"fLaC"
+
+
+def make_stream_header(blocksize, sample_rate, channels, bits_per_sample):
+    """Build the 42-byte `fLaC` magic + STREAMINFO block that libFLAC requires
+    before it will decode a bare run of frames.
+
+    The total number of samples is left at 0, which libFLAC accepts, and the MD5
+    signature is zeroed (meaning "unknown"), so no checksum is verified.
+
+    Parameters
+    ----------
+    blocksize : int
+        The block size of the frames, used as both the minimum and maximum block size
+    sample_rate : int
+        The sample rate of the stream
+    channels : int
+        The number of channels of the stream
+    bits_per_sample : int
+        The bit depth of the stream
+
+    Returns
+    -------
+    bytes
+        The 42-byte header
+    """
+    body = struct.pack(">HH", blocksize, blocksize) + bytes(6)
+    body += ((sample_rate << 44) | ((channels - 1) << 41)
+             | ((bits_per_sample - 1) << 36)).to_bytes(8, "big")
+    # 0x80: last-metadata-block flag + STREAMINFO type, followed by its 34-byte length
+    return FLAC_MAGIC + bytes([0x80, 0, 0, 34]) + body + bytes(16)
+
+
 ### NUMCODECS Codec ###
 class Flac(Codec):
     """Codec for FLAC (Free Lossless Audio Codec).
@@ -191,16 +225,36 @@ class Flac(Codec):
         The internal sample rate used by FLAC, by default 48000
     tmpdir : str or Path, optional
         The folder where to save tmp flac files, by default None (default temporary folder)
+    channels : int, optional
+        The number of channels of the headerless frames to decode, by default None
+    bits_per_sample : int, optional
+        The bit depth of the headerless frames to decode, by default None
+
+    Notes
+    -----
+    Setting `channels` and `bits_per_sample` (together with an explicit `blocksize` and
+    `sample_rate`) enables decoding buffers that are a bare run of complete FLAC frames,
+    with no `fLaC` magic and no STREAMINFO metadata block, as obtained by slicing a byte
+    range out of the middle of a FLAC file. Such a buffer is decoded by prepending a
+    synthesised header describing the stream. Buffers that do start with the `fLaC` magic
+    are decoded as complete streams, so a codec configured this way handles both.
     """
     codec_id = "flac"
     max_channels = 2
     max_blocksizes = [4608, 16384]
 
-    def __init__(self, level=5, blocksize=None, sample_rate=48000, tmpdir=None):
+    def __init__(self, level=5, blocksize=None, sample_rate=48000, tmpdir=None,
+                 channels=None, bits_per_sample=None):
         self.tmpdir = tmpdir
         self.compression_level = level
         self.sample_rate = sample_rate
         self.blocksize = blocksize
+        self.channels = channels
+        self.bits_per_sample = bits_per_sample
+        if channels is not None or bits_per_sample is not None:
+            if channels is None or bits_per_sample is None or blocksize is None:
+                raise ValueError("To decode headerless frames, 'channels', 'bits_per_sample', "
+                                 "and 'blocksize' must all be specified")
         if sample_rate <= 48000:
             self.max_blocksize = self.max_blocksizes[0]
         else:
@@ -228,8 +282,17 @@ class Flac(Codec):
             enc = f.read()
         return enc
 
+    def _is_headerless(self, buf):
+        if self.channels is None:
+            return False
+        magic = bytes(ensure_contiguous_ndarray(buf).view("u1")[:len(FLAC_MAGIC)])
+        return magic != FLAC_MAGIC
+
     def _pre_decode(self, buf, tmp_file):
         with tmp_file.open("wb") as f:
+            if self._is_headerless(buf):
+                f.write(make_stream_header(self.blocksize, self.sample_rate,
+                                           self.channels, self.bits_per_sample))
             f.write(buf)
 
     def encode(self, buf):
@@ -273,7 +336,9 @@ class Flac(Codec):
             tmpdir=str(self.tmpdir) if self.tmpdir is not None else None,
             level=self.compression_level,
             blocksize=self.blocksize,
-            sample_rate=self.sample_rate
+            sample_rate=self.sample_rate,
+            channels=self.channels,
+            bits_per_sample=self.bits_per_sample
         )
 
 

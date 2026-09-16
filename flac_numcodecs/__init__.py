@@ -1,3 +1,3 @@
-from .flac import Flac
+from .flac import Flac, make_stream_header
 
 from .version import version as __version__
