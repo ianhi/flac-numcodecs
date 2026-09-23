@@ -9,6 +9,7 @@ Multi-channel data exceeding the number of channels that can be encoded by the c
 compression procedure.
 """
 from pathlib import Path
+import threading
 import numpy as np
 
 import numcodecs
@@ -133,6 +134,10 @@ class FlacNumpyDecoder(_Decoder):
         self.total_samples = 0
         self.decoded_data_list = []
         self.decoded_data = None
+        # pyflac's error callback sets `_event` after recording the error in `_error`, but
+        # only its StreamDecoder and OneShotDecoder define it; without it, every libFLAC
+        # error also prints an AttributeError traceback from the callback
+        self._event = threading.Event()
 
         c_input_filename = d_ffi.new('char[]', str(input_file).encode('utf-8'))
         rc = d_lib.FLAC__stream_decoder_init_file(
@@ -163,6 +168,10 @@ class FlacNumpyDecoder(_Decoder):
             raise DecoderProcessException(str(self.state))
 
         self.finish()
+        # libFLAC reports lost sync and CRC mismatches through the error callback and then
+        # keeps decoding, so the output is incomplete or wrong unless the error is checked
+        if self._error is not None:
+            raise DecoderProcessException(self._error)
         self.decoded_data = np.vstack(self.decoded_data_list)
 
     def _write_callback(self, data: np.ndarray, sample_rate: int, num_channels: int, num_samples: int):

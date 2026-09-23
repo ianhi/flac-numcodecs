@@ -28,3 +28,15 @@ def make_noisy_sin_signals(shape=(30000,), sin_f=100, sin_amp=50, noise_amp=5,
                                                         sample_rate, dtype)
     return y
 
+
+def split_header(enc):
+    """Split a complete FLAC stream into its header (magic + metadata blocks) and its frames."""
+    assert enc[:4] == b"fLaC"
+    i = 4
+    while True:
+        is_last = enc[i] & 0x80
+        length = int.from_bytes(enc[i + 1:i + 4], "big")
+        i += 4 + length
+        if is_last:
+            break
+    return enc[:i], enc[i:]

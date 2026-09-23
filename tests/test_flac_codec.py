@@ -2,8 +2,9 @@ from flac_numcodecs import Flac
 import numpy as np
 import zarr
 import pytest
+from pyflac.decoder import DecoderProcessException
 
-from helpers import make_noisy_sin_signals
+from helpers import make_noisy_sin_signals, split_header
 
 DEBUG = False
 
@@ -102,6 +103,19 @@ def test_flac_zarr():
                 assert z[:].shape == test_sig.shape
                 assert z[:100, :2, :2].shape == test_sig[:100, :2, :2].shape
 
+
+@pytest.mark.numcodecs
+def test_flac_decode_errors_raise():
+    blocksize = 1000
+    data = make_noisy_sin_signals(shape=(10 * blocksize,), dtype="int16")
+    enc = Flac(blocksize=blocksize).encode(data)
+    _, frames = split_header(enc)
+
+    corrupted = bytearray(enc)
+    corrupted[len(enc) // 2] ^= 0xFF
+    for buf in [enc[:-50], frames[:-50], frames[10:], bytes(corrupted)]:
+        with pytest.raises(DecoderProcessException):
+            Flac().decode(buf)
 
 
 if __name__ == '__main__':
