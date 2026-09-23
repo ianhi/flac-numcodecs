@@ -3,6 +3,8 @@ import numpy as np
 import zarr
 import pytest
 
+from helpers import make_noisy_sin_signals
+
 DEBUG = False
 
 # dtypes = ["int8", "int16", "int32", "float32"]
@@ -22,30 +24,6 @@ def run_all_options(data):
             data_dec = np.frombuffer(dec, dtype=dtype).reshape(data.shape)
             assert np.all(data_dec == data)
         
-
-def make_noisy_sin_signals(shape=(30000,), sin_f=100, sin_amp=50, noise_amp=5,
-                           sample_rate=30000, dtype="int16"):
-    assert isinstance(shape, tuple)
-    assert len(shape) <= 3
-    if len(shape) == 1:
-        y = np.sin(2 * np.pi * sin_f * np.arange(shape[0]) / sample_rate) * sin_amp
-        y = y + np.random.randn(shape[0]) * noise_amp
-        y = y.astype(dtype)
-    elif len(shape) == 2:
-        nsamples, nchannels = shape
-        y = np.zeros(shape, dtype=dtype)
-        for ch in range(nchannels):
-            y[:, ch] = make_noisy_sin_signals((nsamples,), sin_f, sin_amp, noise_amp,
-                                              sample_rate, dtype)
-    else:
-        nsamples, nchannels1, nchannels2 = shape
-        y = np.zeros(shape, dtype=dtype)
-        for ch1 in range(nchannels1):
-            for ch2 in range(nchannels2):
-                y[:, ch1, ch2] = make_noisy_sin_signals((nsamples,), sin_f, sin_amp, noise_amp,
-                                                        sample_rate, dtype)
-    return y
-
 
 def generate_test_signals(dtype):
     test1d = make_noisy_sin_signals(shape=(3000,), dtype=dtype)
