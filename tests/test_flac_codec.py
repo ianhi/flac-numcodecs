@@ -104,6 +104,43 @@ def test_flac_zarr():
                 assert z[:100, :2, :2].shape == test_sig[:100, :2, :2].shape
 
 
+@pytest.mark.bare_frames
+def test_flac_partial_bare_frames():
+    blocksize = 1000
+    nblocks = 10
+    data = make_noisy_sin_signals(shape=(nblocks * blocksize,), dtype="int16")
+
+    # frames are encoded independently, so the frames of an encoded prefix of the signal
+    # are a byte-prefix of the frames of the whole signal: that gives us frame boundaries
+    _, frames = split_header(Flac(blocksize=blocksize).encode(data))
+    offsets = {nb: len(split_header(Flac(blocksize=blocksize).encode(data[:nb * blocksize]))[1])
+               for nb in (3, 7, 8)}
+
+    cod = Flac()
+
+    # a run of frames from the middle of the stream
+    dec = cod.decode(frames[offsets[3]:offsets[7]])
+    assert np.all(dec.reshape(-1) == data[3 * blocksize:7 * blocksize])
+
+    # a run that includes the (possibly shorter) final frame
+    dec = cod.decode(frames[offsets[8]:])
+    assert np.all(dec.reshape(-1) == data[8 * blocksize:])
+
+
+@pytest.mark.bare_frames
+@pytest.mark.parametrize("blocksize", [16, 1000, 4608])
+@pytest.mark.parametrize("sample_rate", [44100, 12345])
+@pytest.mark.parametrize("nchannels", [1, 2])
+def test_flac_bare_frames_roundtrip(blocksize, sample_rate, nchannels):
+    shape = (10 * blocksize + 7, nchannels) if nchannels > 1 else (10 * blocksize + 7,)
+    data = make_noisy_sin_signals(shape=shape, dtype="int16")
+    _, frames = split_header(Flac(blocksize=blocksize, sample_rate=sample_rate).encode(data))
+
+    dec = Flac().decode(frames)
+    assert dec.shape == (shape[0], nchannels)
+    assert np.all(dec.reshape(data.shape) == data)
+
+
 @pytest.mark.numcodecs
 def test_flac_decode_errors_raise():
     blocksize = 1000
@@ -119,5 +156,4 @@ def test_flac_decode_errors_raise():
 
 
 if __name__ == '__main__':
-    test_flac_numcodecs()
-    test_flac_zarr()
+    pytest.main([__file__])

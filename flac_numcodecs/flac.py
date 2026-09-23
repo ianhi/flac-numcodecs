@@ -189,6 +189,10 @@ class Flac(Codec):
     The implementation uses [pyFlac](https://github.com/sonos/pyFLAC).
     If the block has more than 2 channels, the data is flattened before compression.
 
+    Decoding accepts both complete FLAC streams and bare frames: FLAC frames without the
+    file-level metadata (the `fLaC` signature and metadata blocks, RFC 9639 section 8) that
+    precedes them in a file, such as a byte range cut from a FLAC file along frame
+    boundaries.
 
     Parameters
     ----------
