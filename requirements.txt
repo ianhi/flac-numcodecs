@@ -1,3 +1,4 @@
+numcodecs
 numpy
 pyflac
 soundfile
