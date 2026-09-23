@@ -68,6 +68,14 @@ def test_flac_numcodecs():
             print(f"signal shape: {test_sig.shape}")
             run_all_options(test_sig)
 
+def array(data, chunks, compressor):
+    # zarr 3 only takes a numcodecs compressor for zarr format 2 arrays, and does not read
+    # None in a chunk shape as the full extent of that dimension
+    if isinstance(chunks, tuple):
+        chunks = tuple(n if c is None else c for c, n in zip(chunks, data.shape))
+    return zarr.array(data, chunks=chunks, compressor=compressor, zarr_format=2)
+
+
 @pytest.mark.zarr
 def test_flac_zarr():
     for dtype in dtypes:
@@ -79,40 +87,40 @@ def test_flac_zarr():
         for test_sig in test_signals:
             print(f"signal shape: {test_sig.shape}")
             if test_sig.ndim == 1:
-                z = zarr.array(test_sig, chunks=None, compressor=compressor)
+                z = array(test_sig, chunks=None, compressor=compressor)
                 assert z[:].shape == test_sig.shape
                 assert z[:100].shape == test_sig[:100].shape
-                assert z.nbytes > z.nbytes_stored
+                assert z.nbytes > z.nbytes_stored()
 
-                z = zarr.array(test_sig, chunks=(1000), compressor=compressor)
+                z = array(test_sig, chunks=(1000), compressor=compressor)
                 assert z[:].shape == test_sig.shape
                 assert z[:100].shape == test_sig[:100].shape
 
             elif test_sig.ndim == 2:
-                z = zarr.array(test_sig, chunks=None, compressor=compressor)
+                z = array(test_sig, chunks=None, compressor=compressor)
                 assert z[:].shape == test_sig.shape
                 assert z[:100, :10].shape == test_sig[:100, :10].shape
-                assert z.nbytes > z.nbytes_stored
+                assert z.nbytes > z.nbytes_stored()
 
-                z = zarr.array(test_sig, chunks=(1000, None), compressor=compressor)
+                z = array(test_sig, chunks=(1000, None), compressor=compressor)
                 assert z[:].shape == test_sig.shape
                 assert z[:100, :10].shape == test_sig[:100, :10].shape
 
-                z = zarr.array(test_sig, chunks=(None, 10), compressor=compressor)
+                z = array(test_sig, chunks=(None, 10), compressor=compressor)
                 assert z[:].shape == test_sig.shape
                 assert z[:100, :10].shape == test_sig[:100, :10].shape
 
             else: # 3d
-                z = zarr.array(test_sig, chunks=None, compressor=compressor)
+                z = array(test_sig, chunks=None, compressor=compressor)
                 assert z[:].shape == test_sig.shape
                 assert z[:100, :2, :2].shape == test_sig[:100, :2, :2].shape
-                assert z.nbytes > z.nbytes_stored
+                assert z.nbytes > z.nbytes_stored()
 
-                z = zarr.array(test_sig, chunks=(1000, 2, None), compressor=compressor)
+                z = array(test_sig, chunks=(1000, 2, None), compressor=compressor)
                 assert z[:].shape == test_sig.shape
                 assert z[:100, :2, :2].shape == test_sig[:100, :2, :2].shape
 
-                z = zarr.array(test_sig, chunks=(None, 2, 3), compressor=compressor)
+                z = array(test_sig, chunks=(None, 2, 3), compressor=compressor)
                 assert z[:].shape == test_sig.shape
                 assert z[:100, :2, :2].shape == test_sig[:100, :2, :2].shape
 
