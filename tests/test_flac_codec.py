@@ -157,6 +157,16 @@ def test_flac_decode_errors_raise():
 
 
 @pytest.mark.numcodecs
+@pytest.mark.parametrize("nchannels, stream_channels", [(8, 8), (9, 1)])
+def test_flac_channels(nchannels, stream_channels):
+    # up to 8 channels, the most a FLAC stream holds, are encoded as separate FLAC channels
+    data = make_noisy_sin_signals(shape=(1000, nchannels), dtype="int16")
+    dec = Flac().decode(Flac().encode(data))
+    assert dec.shape == (1000 * nchannels // stream_channels, stream_channels)
+    assert np.all(dec.reshape(data.shape) == data)
+
+
+@pytest.mark.numcodecs
 def test_flac_config():
     cod = Flac(level=8, blocksize=1000, sample_rate=16000)
     assert numcodecs.get_codec(cod.get_config()).get_config() == cod.get_config()

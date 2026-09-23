@@ -34,7 +34,7 @@ class FlacNumpyEncoder(_Encoder):
     The pyFLAC data encoder converts data from np.array to a FLAC file.
 
     Args:
-        data (numpy.ndarray): the data to encode (n_samples x 2)
+        data (numpy.ndarray): the data to encode (n_samples x n_channels, up to 8 channels)
         output_file (pathlib.Path): Path to the output FLAC file, a temporary
             file will be created if unspecified.
         sample_rate (int): the sample rate
@@ -57,7 +57,8 @@ class FlacNumpyEncoder(_Encoder):
     Raises:
         ValueError: If any invalid values are passed in to the constructor.
     """
-    max_channels = 2
+    # the most channels a FLAC stream can hold
+    max_channels = 8
 
     def __init__(self,
                  data,
@@ -192,8 +193,9 @@ def _prepare_data(data):
 def encode(data, level=5, blocksize=None, sample_rate=48000, tmpdir=None):
     """Encode an int16 array as a complete FLAC stream.
 
-    A 1D array is encoded as a single channel, and a 2D array with up to 2 columns as one
-    channel per column. Any other array is flattened and encoded as a single channel.
+    A 1D array is encoded as a single channel, and a 2D array with up to 8 columns, the most
+    a FLAC stream can hold, as one channel per column. Any other array is flattened in C
+    order and encoded as a single channel.
 
     Parameters
     ----------
@@ -277,7 +279,7 @@ class Flac(Codec):
     """Codec for FLAC (Free Lossless Audio Codec).
 
     The implementation uses [pyFlac](https://github.com/sonos/pyFLAC).
-    If the block has more than 2 channels, the data is flattened before compression.
+    If the block has more than 8 channels, the data is flattened before compression.
 
     Decoding accepts both complete FLAC streams and bare frames; see
     `flac_numcodecs.flac.decode`.
@@ -294,7 +296,7 @@ class Flac(Codec):
         The folder where to save tmp flac files, by default None (default temporary folder)
     """
     codec_id = "flac"
-    max_channels = 2
+    max_channels = FlacNumpyEncoder.max_channels
     max_blocksizes = [4608, 16384]
 
     def __init__(self, level=5, blocksize=None, sample_rate=48000, tmpdir=None):
