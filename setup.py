@@ -15,7 +15,11 @@ version = d['version']
 long_description = open("README.md").read()
 
 install_requires = open_requirements('requirements.txt')
-entry_points = {"numcodecs.codecs": ["flac = flac_numcodecs:Flac"]}
+entry_points = {
+    "numcodecs.codecs": ["flac = flac_numcodecs:Flac"],
+    # zarr v3 discovers codecs through its own entry point group
+    "zarr.codecs": ["flac = flac_numcodecs.zarr3:Flac"],
+}
 
 setup(
     name="flac_numcodecs",

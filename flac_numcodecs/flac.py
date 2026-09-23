@@ -135,6 +135,7 @@ class FlacNumpyDecoder(_Decoder):
         self.total_samples = 0
         self.decoded_data_list = []
         self.decoded_data = None
+        self.frames = []
         # pyflac's error callback sets `_event` after recording the error in `_error`, but
         # only its StreamDecoder and OneShotDecoder define it; without it, every libFLAC
         # error also prints an AttributeError traceback from the callback
@@ -180,6 +181,7 @@ class FlacNumpyDecoder(_Decoder):
         Internal callback to write the decoded data to a Numpy array file.
         """
         self.decoded_data_list.append(data)
+        self.frames.append((sample_rate, num_samples))
         self.total_samples += num_samples
 
 
@@ -188,6 +190,11 @@ def _prepare_data(data):
     if data.ndim == 2 and data.shape[1] <= FlacNumpyEncoder.max_channels:
         return data
     return data.reshape(-1)[:, None]
+
+
+def max_blocksize(sample_rate):
+    """The largest block size the FLAC streamable subset allows at `sample_rate`."""
+    return Flac.max_blocksizes[0] if sample_rate <= 48000 else Flac.max_blocksizes[1]
 
 
 def encode(data, level=5, blocksize=None, sample_rate=48000, tmpdir=None):
@@ -220,12 +227,12 @@ def encode(data, level=5, blocksize=None, sample_rate=48000, tmpdir=None):
     """
     data = _prepare_data(data)
     nsamples = data.shape[0]
-    max_blocksize = Flac.max_blocksizes[0] if sample_rate <= 48000 else Flac.max_blocksizes[1]
+    cap = max_blocksize(sample_rate)
 
     if blocksize is None:
-        blocksize = min(nsamples, max_blocksize) if nsamples > 16 else 0
+        blocksize = min(nsamples, cap) if nsamples > 16 else 0
     else:
-        blocksize = min(blocksize, max_blocksize)
+        blocksize = min(blocksize, cap)
 
     with TemporaryDirectory(dir=tmpdir) as tmp:
         tmp_file = Path(tmp) / "tmp.flac"
@@ -266,12 +273,17 @@ def decode(buf, tmpdir=None):
         If libFLAC reports an error: a frame truncated by the end of the buffer, a buffer
         that does not start on a frame boundary, or corrupted data
     """
+    return _decode_frames(buf, tmpdir)[0]
+
+
+def _decode_frames(buf, tmpdir=None):
+    """`decode`, also returning the (sample rate, block size) of each decoded frame."""
     with TemporaryDirectory(dir=tmpdir) as tmp:
         tmp_file = Path(tmp) / "tmp.flac"
         tmp_file.write_bytes(ensure_contiguous_ndarray(buf))
         decoder = FlacNumpyDecoder(tmp_file)
         decoder.process()
-    return decoder.decoded_data
+    return decoder.decoded_data, decoder.frames
 
 
 ### NUMCODECS Codec ###
@@ -279,7 +291,9 @@ class Flac(Codec):
     """Codec for FLAC (Free Lossless Audio Codec).
 
     The implementation uses [pyFlac](https://github.com/sonos/pyFLAC).
-    If the block has more than 8 channels, the data is flattened before compression.
+    If the block has more than 8 channels, the data is flattened in C order before
+    compression, which interleaves the channels sample by sample. The Zarr v3 codec,
+    `flac_numcodecs.zarr3.Flac`, keeps each channel's samples together instead.
 
     Decoding accepts both complete FLAC streams and bare frames; see
     `flac_numcodecs.flac.decode`.
@@ -304,10 +318,7 @@ class Flac(Codec):
         self.compression_level = level
         self.sample_rate = sample_rate
         self.blocksize = blocksize
-        if sample_rate <= 48000:
-            self.max_blocksize = self.max_blocksizes[0]
-        else:
-            self.max_blocksize = self.max_blocksizes[1]
+        self.max_blocksize = max_blocksize(sample_rate)
 
     def encode(self, buf):
         return encode(buf, level=self.compression_level, blocksize=self.blocksize,
