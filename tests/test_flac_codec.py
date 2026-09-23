@@ -1,5 +1,6 @@
 from flac_numcodecs import Flac
 import numpy as np
+import numcodecs
 import zarr
 import pytest
 from pyflac.decoder import DecoderProcessException
@@ -153,6 +154,15 @@ def test_flac_decode_errors_raise():
     for buf in [enc[:-50], frames[:-50], frames[10:], bytes(corrupted)]:
         with pytest.raises(DecoderProcessException):
             Flac().decode(buf)
+
+
+@pytest.mark.numcodecs
+def test_flac_config():
+    cod = Flac(level=8, blocksize=1000, sample_rate=16000)
+    assert numcodecs.get_codec(cod.get_config()).get_config() == cod.get_config()
+
+    default_config = Flac().get_config()
+    assert numcodecs.get_codec(default_config).get_config() == default_config
 
 
 if __name__ == '__main__':
