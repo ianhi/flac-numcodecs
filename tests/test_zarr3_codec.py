@@ -12,7 +12,7 @@ zarr = pytest.importorskip("zarr", minversion="3.1")
 
 from flac_numcodecs.zarr3 import Flac as FlacZarr3
 
-from helpers import make_noisy_sin_signals, split_header
+from helpers import bit_depth_from_streaminfo, make_noisy_sin_signals, split_header
 
 
 BLOCKSIZE = 1000
@@ -59,7 +59,7 @@ def test_zarr3_codec_config():
 @pytest.mark.zarr3
 @pytest.mark.parametrize("kwargs", [dict(level=9), dict(sample_rate=0),
                                     dict(sample_rate=1048576), dict(blocksize=8),
-                                    dict(blocksize=65536)])
+                                    dict(blocksize=65536), dict(bits_per_sample=24)])
 def test_zarr3_codec_rejects_invalid_configuration(kwargs):
     with pytest.raises(ValueError):
         FlacZarr3(**kwargs)
@@ -228,3 +228,23 @@ def test_zarr3_rejects_32_bit_data(tmp_path):
 
     with pytest.raises(ValueError, match="decoded to int32"):
         zarr.open_array(str(store_path), mode="r")[:]
+
+
+@pytest.mark.zarr3
+def test_zarr3_bare_frames_bit_depth_from_configuration(tmp_path):
+    # frames that take their bit depth from STREAMINFO take it from `bits_per_sample`
+    data = make_noisy_sin_signals(shape=(BLOCKSIZE,), dtype="int16")
+    _, frame = split_header(Flac(blocksize=BLOCKSIZE).encode(data))
+    frame = bit_depth_from_streaminfo(frame)
+
+    for codec in [FlacZarr3(), FlacZarr3(bits_per_sample=16)]:
+        store_path = tmp_path / f"bits_{codec.bits_per_sample}.zarr"
+        create_array(store_path, data, chunks=data.shape, codec=codec)
+        write_chunk(store_path, "0", frame)
+        z = zarr.open_array(str(store_path), mode="r")
+        if codec.bits_per_sample is None:
+            with pytest.raises(ValueError, match="without bits_per_sample"):
+                z[:]
+        else:
+            assert np.all(z[:] == data)
+
