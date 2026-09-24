@@ -68,14 +68,16 @@ codec does not receive the chunk shape it would need to undo it.
 `flac_numcodecs.zarr3.Flac` takes three optional parameters, all used when writing:
 
 - `level`: the FLAC compression level, from 0 to 8 (default 5)
-- `blocksize`: the number of samples in each FLAC frame (default: as many as the chunk
-  holds, up to 4608 at 48 kHz or below and 16384 above)
-- `sample_rate`: the sample rate written into each FLAC stream (default 48000)
+- `blocksize`: the number of samples in each FLAC frame, from 16 to 65535 (default: as many
+  as the chunk holds, up to 4608 at 48 kHz or below and 16384 above)
+- `sample_rate`: the sample rate written into each FLAC stream, from 1 to 1048575 Hz
+  (default 48000)
 
 Only the parameters you set are recorded in the array metadata. When `blocksize` or
 `sample_rate` is set, reading checks it against every FLAC frame and raises if they
-disagree, so the metadata cannot silently misdescribe the audio. Reading needs no
-parameters, and a chunk may hold either a complete FLAC stream or bare frames (see below).
+disagree. The check cannot cover the sample rate of bare frames at a rate their headers
+cannot state (see below), because nothing in those frames records it. Reading needs no
+parameters, and a chunk may hold either a complete FLAC stream or bare frames.
 
 ### Zarr v2
 
@@ -123,7 +125,10 @@ frames = ... # a byte range covering whole frames of a FLAC file
 data = Flac().decode(frames)  # shape (n_samples, n_channels)
 ```
 
-It works for 16-bit audio at a standard sample rate, which covers the output of common
-encoders such as libFLAC and ffmpeg. A buffer that does not hold whole, intact frames,
-because it starts or ends mid-frame or is corrupted, raises
-`pyflac.decoder.DecoderProcessException`.
+Each frame header records the frame's sample rate, except for rates above 65535 Hz that
+are not a multiple of 10 and rates above 655350 Hz, such as 768 kHz. Only the file's
+`STREAMINFO` block records those, but the sample rate does not change the decoded samples,
+so such frames decode too.
+
+Only 16-bit audio is supported. A buffer that does not hold whole, intact frames, because it
+starts or ends mid-frame or is corrupted, raises `pyflac.decoder.DecoderProcessException`.
