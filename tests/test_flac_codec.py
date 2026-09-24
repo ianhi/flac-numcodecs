@@ -5,10 +5,10 @@ import zarr
 import pytest
 from pyflac.decoder import DecoderProcessException
 
-from flac_numcodecs.flac import FlacNumpyEncoder
+from flac_numcodecs.flac import FlacNumpyEncoder, _decode_frames, decode
 from flac_numcodecs.zarr3 import Flac as FlacZarr3
 
-from helpers import make_noisy_sin_signals, split_header
+from helpers import bit_depth_from_streaminfo, make_noisy_sin_signals, split_header
 
 DEBUG = False
 
@@ -137,6 +137,12 @@ def test_flac_bare_frames_rate_from_streaminfo(sample_rate, nchannels):
     assert frames[2] & 0x0F == 0
     assert np.all(Flac().decode(frames).reshape(data.shape) == data)
 
+    # the sample rate is unknown unless it is given
+    assert {rate for rate, _ in _decode_frames(frames)[1]} == {0}
+    dec, decoded_frames = _decode_frames(frames, sample_rate=sample_rate)
+    assert np.all(dec.reshape(data.shape) == data)
+    assert {rate for rate, _ in decoded_frames} == {sample_rate}
+
 
 @pytest.mark.bare_frames
 def test_flac_bare_frames_bit_depth_from_streaminfo_raises(tmp_path):
@@ -155,6 +161,19 @@ def test_flac_bare_frames_bit_depth_from_streaminfo_raises(tmp_path):
     assert (frames[3] >> 1) & 0b111 == 0
     with pytest.raises(ValueError, match="take their bit depth from the STREAMINFO"):
         Flac().decode(frames)
+
+
+@pytest.mark.bare_frames
+@pytest.mark.parametrize("sample_rate", [48000, 768000])
+def test_flac_bare_frames_bit_depth_given(sample_rate):
+    data = make_noisy_sin_signals(shape=(1000,), dtype="int16")
+    _, frame = split_header(Flac(blocksize=1000, sample_rate=sample_rate).encode(data))
+    frame = bit_depth_from_streaminfo(frame)
+    assert (frame[3] >> 1) & 0b111 == 0
+
+    with pytest.raises(ValueError, match="without bits_per_sample"):
+        decode(frame)
+    assert np.all(decode(frame, bits_per_sample=16).reshape(-1) == data)
 
 
 @pytest.mark.numcodecs

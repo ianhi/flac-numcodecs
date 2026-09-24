@@ -65,19 +65,19 @@ single FLAC channel that holds each channel in turn, which compresses much bette
 interleaving them sample by sample. Zarr v2 arrays cannot use this layout, because a Zarr v2
 codec does not receive the chunk shape it would need to undo it.
 
-`flac_numcodecs.zarr3.Flac` takes three optional parameters, all used when writing:
+`flac_numcodecs.zarr3.Flac` takes four optional parameters:
 
 - `level`: the FLAC compression level, from 0 to 8 (default 5)
 - `blocksize`: the number of samples in each FLAC frame, from 16 to 65535 (default: as many
   as the chunk holds, up to 4608 at 48 kHz or below and 16384 above)
 - `sample_rate`: the sample rate written into each FLAC stream, from 1 to 1048575 Hz
   (default 48000)
+- `bits_per_sample`: the bit depth of the FLAC frames; only 16 is supported
 
-Only the parameters you set are recorded in the array metadata. When `blocksize` or
-`sample_rate` is set, reading checks it against every FLAC frame and raises if they
-disagree. The check cannot cover the sample rate of bare frames at a rate their headers
-cannot state (see below), because nothing in those frames records it. Reading needs no
-parameters, and a chunk may hold either a complete FLAC stream or bare frames.
+Only the parameters you set are recorded in the array metadata. When `blocksize`,
+`sample_rate` or `bits_per_sample` is set, reading checks it against every FLAC frame and
+raises if they disagree. A chunk may hold either a complete FLAC stream or bare frames
+(see below).
 
 ### Zarr v2
 
@@ -111,11 +111,10 @@ codec described above.
 
 ### Decoding bare frames
 
-A FLAC file starts with file-level metadata, the `fLaC` signature and metadata blocks such
-as `STREAMINFO` ([RFC 9639, section 8](https://www.rfc-editor.org/rfc/rfc9639.html#section-8)), followed by
-the frames. Each frame has its own header, so the codec also decodes bare frames: frames
-without the file-level metadata, such as a byte range cut from a FLAC file along frame
-boundaries:
+Bare frames are FLAC frames without the file-level metadata that precedes them in a file:
+the `fLaC` signature and the metadata blocks, including `STREAMINFO`
+([RFC 9639, section 8](https://www.rfc-editor.org/rfc/rfc9639.html#section-8)). A byte range cut from a FLAC file
+along frame boundaries holds bare frames, and the codec decodes them as they are:
 
 ```
 from flac_numcodecs import Flac
@@ -125,10 +124,12 @@ frames = ... # a byte range covering whole frames of a FLAC file
 data = Flac().decode(frames)  # shape (n_samples, n_channels)
 ```
 
-Each frame header records the frame's sample rate, except for rates above 65535 Hz that
-are not a multiple of 10 and rates above 655350 Hz, such as 768 kHz. Only the file's
-`STREAMINFO` block records those, but the sample rate does not change the decoded samples,
-so such frames decode too.
+A frame header states the frame's sample rate and bit depth, except for sample rates above
+65535 Hz that are not a multiple of 10 or above 655350 Hz, and bit depths other than 8, 12,
+16, 20, 24 and 32 bits, which only `STREAMINFO` records. For such bare frames, the Zarr v3
+codec uses its `sample_rate` and `bits_per_sample` instead, and cannot check them against
+the frames. Without `sample_rate` the sample rate is unknown, which does not change the
+decoded samples; without `bits_per_sample`, reading raises `ValueError`.
 
-Only 16-bit audio is supported. A buffer that does not hold whole, intact frames, because it
-starts or ends mid-frame or is corrupted, raises `pyflac.decoder.DecoderProcessException`.
+Only 16-bit audio is supported. A buffer that does not hold whole, intact frames raises
+`pyflac.decoder.DecoderProcessException`.

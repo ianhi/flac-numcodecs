@@ -220,18 +220,17 @@ def _starts_with_frame(buf):
 _FRAME_BIT_DEPTHS = {1: 8, 2: 12, 4: 16, 5: 20, 6: 24, 7: 32}
 
 
-def _stand_in_streaminfo(bits_per_sample):
+def _stand_in_streaminfo(sample_rate, bits_per_sample):
     """`fLaC` signature and a STREAMINFO block for bare frames that take their sample rate
-    from STREAMINFO, which libFLAC does not decode without one.
+    or bit depth from STREAMINFO, which libFLAC does not decode without one.
 
-    The block records a sample rate of 0, which means unknown and does not change the
-    decoded samples, and the bit depth the frames state. Frame headers always state their
-    channels, so the channel count here is a placeholder. The minimum and maximum block
-    sizes differ: when they are equal, libFLAC takes the stream to have that fixed block
-    size and, for frames of any other size, inserts zeros to fill what it takes to be
-    missing frames, without reporting an error.
+    A sample rate of 0 means unknown. Frame headers always state their channels, so the
+    channel count here is a placeholder. The minimum and maximum block sizes differ: when
+    they are equal, libFLAC takes the stream to have that fixed block size and, for frames
+    of any other size, inserts zeros to fill what it takes to be missing frames, without
+    reporting an error.
     """
-    sample_rate, channels = 0, 1
+    channels = 1
     body = struct.pack(">HH", 16, MAX_BLOCKSIZE) + bytes(6)
     body += ((sample_rate << 44) | ((channels - 1) << 41)
              | ((bits_per_sample - 1) << 36)).to_bytes(8, "big")
@@ -282,19 +281,16 @@ def encode(data, level=5, blocksize=None, sample_rate=48000, tmpdir=None):
         return tmp_file.read_bytes()
 
 
-def decode(buf, tmpdir=None):
+def decode(buf, tmpdir=None, sample_rate=None, bits_per_sample=None):
     """Decode a complete FLAC stream, or bare frames.
 
-    Bare frames are complete FLAC frames without the file-level metadata that precedes them
-    in a FLAC file: the `fLaC` signature and the metadata blocks, including STREAMINFO
-    (RFC 9639, section 8). A byte range cut from a FLAC file along frame boundaries holds
-    bare frames. Each frame header states the frame's block size and channels, and usually
-    its sample rate and bit depth. A frame header cannot state a sample rate above 65535 Hz
-    that is not a multiple of 10, or one above 655350 Hz, nor a bit depth other than 8, 12,
-    16, 20, 24 or 32 bits; such frames refer to STREAMINFO instead. Frames that refer to it
-    for their sample rate decode, since the sample rate does not change the decoded samples.
-    Frames that refer to it for their bit depth cannot be decoded, since the bit depth does
-    change them.
+    Bare frames are FLAC frames without the file-level metadata that precedes them in a
+    file: the `fLaC` signature and the metadata blocks, including STREAMINFO (RFC 9639,
+    section 8). A byte range cut from a FLAC file along frame boundaries holds bare frames.
+    A frame header cannot state a sample rate above 65535 Hz that is not a multiple of 10 or
+    above 655350 Hz, nor a bit depth other than 8, 12, 16, 20, 24 or 32 bits; such frames
+    take the value from STREAMINFO, and in bare frames `sample_rate` and `bits_per_sample`
+    stand in for it.
 
     Only 16-bit and 32-bit audio are supported.
 
@@ -304,6 +300,11 @@ def decode(buf, tmpdir=None):
         The encoded bytes
     tmpdir : str or Path, optional
         The folder where to save tmp flac files, by default None (default temporary folder)
+    sample_rate : int, optional
+        The sample rate of bare frames that take it from STREAMINFO, by default None
+        (unknown, which does not change the decoded samples)
+    bits_per_sample : int, optional
+        The bit depth of bare frames that take it from STREAMINFO, by default None
 
     Returns
     -------
@@ -317,15 +318,16 @@ def decode(buf, tmpdir=None):
         If libFLAC reports an error: a frame truncated by the end of the buffer, a buffer
         that does not start on a frame boundary, or corrupted data
     ValueError
-        If `buf` is bare frames that take their bit depth from STREAMINFO
+        If `buf` is bare frames that take their bit depth from STREAMINFO and
+        `bits_per_sample` is not given
     """
-    return _decode_frames(buf, tmpdir)[0]
+    return _decode_frames(buf, tmpdir, sample_rate, bits_per_sample)[0]
 
 
-def _decode_frames(buf, tmpdir=None):
+def _decode_frames(buf, tmpdir=None, sample_rate=None, bits_per_sample=None):
     """`decode`, also returning the (sample rate, block size) of each decoded frame.
 
-    The sample rate is 0 for a bare frame that takes its sample rate from STREAMINFO.
+    The sample rate is 0 when it is unknown.
     """
     buf = ensure_contiguous_ndarray(buf).view("u1")
     stand_in = b""
@@ -333,12 +335,14 @@ def _decode_frames(buf, tmpdir=None):
     if _starts_with_frame(buf) and len(buf) >= 4:
         sample_rate_code = buf[2] & 0x0F
         bit_depth_code = (buf[3] >> 1) & 0b111
-        if bit_depth_code == 0:
+        if bit_depth_code == 0 and bits_per_sample is None:
             raise ValueError("The FLAC frames take their bit depth from the STREAMINFO block "
                              "of the file they were cut from, which is not included, so they "
-                             "cannot be decoded")
-        if sample_rate_code == 0 and bit_depth_code in _FRAME_BIT_DEPTHS:
-            stand_in = _stand_in_streaminfo(_FRAME_BIT_DEPTHS[bit_depth_code])
+                             "cannot be decoded without bits_per_sample")
+        if sample_rate_code == 0 or bit_depth_code == 0:
+            stand_in = _stand_in_streaminfo(
+                sample_rate or 0,
+                bits_per_sample if bit_depth_code == 0 else _FRAME_BIT_DEPTHS[bit_depth_code])
     with TemporaryDirectory(dir=tmpdir) as tmp:
         tmp_file = Path(tmp) / "tmp.flac"
         with tmp_file.open("wb") as f:

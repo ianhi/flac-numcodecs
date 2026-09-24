@@ -45,13 +45,12 @@ class Flac(ArrayBytesCodec):
     Decoding accepts complete FLAC streams as well as bare frames; see
     `flac_numcodecs.flac.decode`.
 
-    Only the parameters that are set are recorded in the array metadata. `blocksize` and
-    `sample_rate` describe the FLAC frames, so when they are set, decoding checks them
-    against every frame and raises if a frame differs. Leave them unset for an array
-    whose frames vary, or to record nothing about them. A frame header cannot state a sample
-    rate above 65535 Hz that is not a multiple of 10, or one above 655350 Hz, and refers to
-    the file's STREAMINFO block for it instead. A chunk of bare frames at such a rate
-    has no record of its sample rate, so the check cannot apply to it.
+    Only the parameters that are set are recorded in the array metadata. `blocksize`,
+    `sample_rate` and `bits_per_sample` describe the FLAC frames, so when they are set,
+    decoding checks them against every frame and raises if a frame differs. Leave them unset
+    for an array whose frames vary, or to record nothing about them. For bare frames that
+    take their sample rate or bit depth from STREAMINFO, `sample_rate` and
+    `bits_per_sample` stand in for it instead, and cannot be checked.
 
     Parameters
     ----------
@@ -63,10 +62,13 @@ class Flac(ArrayBytesCodec):
     sample_rate : int, optional
         The sample rate of the frames, up to 1048575 Hz, by default None (48000 is written
         to encoded streams)
+    bits_per_sample : int, optional
+        The bit depth of the frames, by default None; only 16 is supported
     """
     level: int | None = None
     blocksize: int | None = None
     sample_rate: int | None = None
+    bits_per_sample: int | None = None
 
     is_fixed_size = False
 
@@ -79,6 +81,8 @@ class Flac(ArrayBytesCodec):
         if self.blocksize is not None and not 16 <= self.blocksize <= MAX_BLOCKSIZE:
             raise ValueError(f"blocksize must be between 16 and {MAX_BLOCKSIZE}, "
                              f"got {self.blocksize}")
+        if self.bits_per_sample is not None and self.bits_per_sample != 16:
+            raise ValueError(f"bits_per_sample must be 16, got {self.bits_per_sample}")
 
     @property
     def _configuration(self):
@@ -98,7 +102,10 @@ class Flac(ArrayBytesCodec):
         _check_int16(dtype.to_native_dtype())
 
     def _decode_sync(self, chunk_bytes: Buffer, chunk_spec: ArraySpec) -> NDBuffer:
-        samples, frames = _decode_frames(chunk_bytes.as_numpy_array())
+        samples, frames = _decode_frames(chunk_bytes.as_numpy_array(),
+                                         sample_rate=self.sample_rate,
+                                         bits_per_sample=self.bits_per_sample)
+        # only 16-bit frames decode to int16, so this also checks `bits_per_sample`
         if samples.dtype != np.int16:
             raise ValueError(f"FLAC data decoded to {samples.dtype}, but only 16-bit FLAC data "
                              "is supported")
@@ -118,7 +125,7 @@ class Flac(ArrayBytesCodec):
 
     def _check_frames(self, frames):
         for i, (sample_rate, blocksize) in enumerate(frames):
-            # 0: a bare frame that takes its sample rate from STREAMINFO, so it is unknown
+            # 0: unknown
             if self.sample_rate is not None and sample_rate not in (0, self.sample_rate):
                 raise ValueError(f"FLAC frame {i} has sample rate {sample_rate}, but the codec "
                                  f"configuration says {self.sample_rate}")
@@ -136,7 +143,9 @@ class Flac(ArrayBytesCodec):
         if samples.shape[1] > FlacNumpyEncoder.max_channels:
             samples = samples.T.reshape(-1)
         # FLAC reads the samples in native byte order and C order
-        enc = encode(np.ascontiguousarray(samples), **self._configuration)
+        # libFLAC takes the bit depth from the int16 samples
+        options = {k: v for k, v in self._configuration.items() if k != "bits_per_sample"}
+        enc = encode(np.ascontiguousarray(samples), **options)
         return chunk_spec.prototype.buffer.from_bytes(enc)
 
     async def _decode_single(self, chunk_bytes: Buffer, chunk_spec: ArraySpec) -> NDBuffer:
