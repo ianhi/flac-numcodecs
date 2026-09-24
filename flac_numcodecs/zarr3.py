@@ -23,7 +23,7 @@ from zarr.core.buffer import Buffer, NDBuffer
 from zarr.core.array_spec import ArraySpec
 from zarr.core.common import parse_named_configuration
 
-from .flac import FlacNumpyEncoder, encode, _decode_frames, max_blocksize
+from .flac import MAX_BLOCKSIZE, MAX_SAMPLE_RATE, FlacNumpyEncoder, encode, _decode_frames
 
 
 def _check_int16(dtype):
@@ -48,17 +48,21 @@ class Flac(ArrayBytesCodec):
     Only the parameters that are set are recorded in the array metadata. `blocksize` and
     `sample_rate` describe the FLAC frames, so when they are set, decoding checks them
     against every frame and raises if a frame differs. Leave them unset for an array
-    whose frames vary, or to record nothing about them.
+    whose frames vary, or to record nothing about them. A frame header cannot state a sample
+    rate above 65535 Hz that is not a multiple of 10, or one above 655350 Hz, and refers to
+    the file's STREAMINFO block for it instead. A chunk of bare frames at such a rate
+    has no record of its sample rate, so the check cannot apply to it.
 
     Parameters
     ----------
     level : int, optional
         The FLAC compression level (0-8) used for encoding, by default None (5)
     blocksize : int, optional
-        The block size of the frames, by default None (see `flac_numcodecs.flac.encode`).
-        At most 4608 up to 48 kHz and 16384 above, the limits of the FLAC streamable subset
+        The block size of the frames, from 16 to 65535, by default None (see
+        `flac_numcodecs.flac.encode`)
     sample_rate : int, optional
-        The sample rate of the frames, by default None (48000 is written to encoded streams)
+        The sample rate of the frames, up to 1048575 Hz, by default None (48000 is written
+        to encoded streams)
     """
     level: int | None = None
     blocksize: int | None = None
@@ -69,13 +73,12 @@ class Flac(ArrayBytesCodec):
     def __post_init__(self):
         if self.level is not None and not 0 <= self.level <= 8:
             raise ValueError(f"level must be between 0 and 8, got {self.level}")
-        if self.sample_rate is not None and self.sample_rate <= 0:
-            raise ValueError(f"sample_rate must be positive, got {self.sample_rate}")
-        if self.blocksize is not None:
-            cap = max_blocksize(self.sample_rate or 48000)
-            if not 16 <= self.blocksize <= cap:
-                raise ValueError(f"blocksize must be between 16 and {cap} at this sample rate, "
-                                 f"got {self.blocksize}")
+        if self.sample_rate is not None and not 1 <= self.sample_rate <= MAX_SAMPLE_RATE:
+            raise ValueError(f"sample_rate must be between 1 and {MAX_SAMPLE_RATE}, "
+                             f"got {self.sample_rate}")
+        if self.blocksize is not None and not 16 <= self.blocksize <= MAX_BLOCKSIZE:
+            raise ValueError(f"blocksize must be between 16 and {MAX_BLOCKSIZE}, "
+                             f"got {self.blocksize}")
 
     @property
     def _configuration(self):
@@ -96,6 +99,9 @@ class Flac(ArrayBytesCodec):
 
     def _decode_sync(self, chunk_bytes: Buffer, chunk_spec: ArraySpec) -> NDBuffer:
         samples, frames = _decode_frames(chunk_bytes.as_numpy_array())
+        if samples.dtype != np.int16:
+            raise ValueError(f"FLAC data decoded to {samples.dtype}, but only 16-bit FLAC data "
+                             "is supported")
         self._check_frames(frames)
         shape = chunk_spec.shape
         if samples.size != prod(shape):
@@ -112,7 +118,8 @@ class Flac(ArrayBytesCodec):
 
     def _check_frames(self, frames):
         for i, (sample_rate, blocksize) in enumerate(frames):
-            if self.sample_rate is not None and sample_rate != self.sample_rate:
+            # 0: a bare frame that takes its sample rate from STREAMINFO, so it is unknown
+            if self.sample_rate is not None and sample_rate not in (0, self.sample_rate):
                 raise ValueError(f"FLAC frame {i} has sample rate {sample_rate}, but the codec "
                                  f"configuration says {self.sample_rate}")
             # the last frame of a stream may be shorter

@@ -5,6 +5,7 @@ import zarr
 import pytest
 from pyflac.decoder import DecoderProcessException
 
+from flac_numcodecs.flac import FlacNumpyEncoder
 from flac_numcodecs.zarr3 import Flac as FlacZarr3
 
 from helpers import make_noisy_sin_signals, split_header
@@ -118,6 +119,51 @@ def test_flac_bare_frames_roundtrip(blocksize, sample_rate, nchannels):
     dec = Flac().decode(frames)
     assert dec.shape == (shape[0], nchannels)
     assert np.all(dec.reshape(data.shape) == data)
+
+
+# rates a frame header cannot state, so that each frame refers to STREAMINFO for its rate
+@pytest.mark.bare_frames
+@pytest.mark.parametrize("sample_rate", [96001, 768000, 1048575])
+@pytest.mark.parametrize("nchannels", [1, 2])
+def test_flac_bare_frames_rate_from_streaminfo(sample_rate, nchannels):
+    blocksize = 1000
+    shape = (10 * blocksize + 7, nchannels) if nchannels > 1 else (10 * blocksize + 7,)
+    data = make_noisy_sin_signals(shape=shape, dtype="int16")
+    enc = Flac(blocksize=blocksize, sample_rate=sample_rate).encode(data)
+    assert np.all(Flac().decode(enc).reshape(data.shape) == data)
+
+    _, frames = split_header(enc)
+    # the low 4 bits of the frame header's third byte: 0 means "see STREAMINFO"
+    assert frames[2] & 0x0F == 0
+    assert np.all(Flac().decode(frames).reshape(data.shape) == data)
+
+
+@pytest.mark.bare_frames
+def test_flac_bare_frames_bit_depth_from_streaminfo_raises(tmp_path):
+    # a frame header states only 8, 12, 16, 20, 24 or 32 bits, and takes any other bit depth
+    # from STREAMINFO, so bare 15-bit frames cannot be decoded
+    data = np.full((1000, 1), 3, dtype=np.int16)
+    flac_file = tmp_path / "15bit.flac"
+    encoder = FlacNumpyEncoder(data, flac_file, blocksize=1000, streamable_subset=False)
+    encoder._channels = 1
+    encoder._bits_per_sample = 15
+    encoder._init()
+    encoder.process()
+
+    _, frames = split_header(flac_file.read_bytes())
+    # bits 1-3 of the frame header's fourth byte: 0 means "see STREAMINFO"
+    assert (frames[3] >> 1) & 0b111 == 0
+    with pytest.raises(ValueError, match="take their bit depth from the STREAMINFO"):
+        Flac().decode(frames)
+
+
+@pytest.mark.numcodecs
+def test_flac_decode_stream_with_id3_tag():
+    data = make_noisy_sin_signals(shape=(5000,), dtype="int16")
+    # an ID3v2.4 header for a tag of 10 bytes, followed by the tag
+    id3 = b"ID3\x04\x00\x00\x00\x00\x00\x0a" + bytes(10)
+    dec = Flac().decode(id3 + Flac().encode(data))
+    assert np.all(dec.reshape(-1) == data)
 
 
 @pytest.mark.numcodecs

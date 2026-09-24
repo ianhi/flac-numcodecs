@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from flac_numcodecs import Flac
+from flac_numcodecs.flac import FlacNumpyEncoder
 
 zarr = pytest.importorskip("zarr", minversion="3.1")
 
@@ -56,13 +57,12 @@ def test_zarr3_codec_config():
 
 
 @pytest.mark.zarr3
-@pytest.mark.parametrize("kwargs", [dict(level=9), dict(sample_rate=0), dict(blocksize=8),
-                                    dict(blocksize=8192), dict(blocksize=8192, sample_rate=44100)])
+@pytest.mark.parametrize("kwargs", [dict(level=9), dict(sample_rate=0),
+                                    dict(sample_rate=1048576), dict(blocksize=8),
+                                    dict(blocksize=65536)])
 def test_zarr3_codec_rejects_invalid_configuration(kwargs):
     with pytest.raises(ValueError):
         FlacZarr3(**kwargs)
-    # a block size that the streamable subset only allows above 48 kHz
-    assert FlacZarr3(blocksize=8192, sample_rate=96000).blocksize == 8192
 
 
 # a chunk with up to 8 channels is encoded with one FLAC channel per channel, a chunk with
@@ -184,4 +184,47 @@ def test_zarr3_chunk_with_wrong_channels_raises(tmp_path):
     write_chunk(store_path, "0/0", Flac().encode(data))
 
     with pytest.raises(ValueError, match="2 channels, but the chunk has 4"):
+        zarr.open_array(str(store_path), mode="r")[:]
+
+
+@pytest.mark.zarr3
+def test_zarr3_high_sample_rate(tmp_path):
+    # 768 kHz is above what a frame header can state, so each frame refers to STREAMINFO
+    data = make_noisy_sin_signals(shape=(4 * BLOCKSIZE,), dtype="int16")
+    codec = FlacZarr3(blocksize=BLOCKSIZE, sample_rate=768000)
+
+    z = create_array(tmp_path / "written.zarr", data, chunks=(2 * BLOCKSIZE,), codec=codec)
+    z[:] = data
+    assert np.all(zarr.open_array(str(tmp_path / "written.zarr"), mode="r")[:] == data)
+
+    store_path = tmp_path / "bare_frames.zarr"
+    create_array(store_path, data, chunks=(2 * BLOCKSIZE,), codec=codec)
+    for i in range(2):
+        chunk = data[i * 2 * BLOCKSIZE:(i + 1) * 2 * BLOCKSIZE]
+        write_chunk(store_path, str(i),
+                    split_header(Flac(blocksize=BLOCKSIZE, sample_rate=768000).encode(chunk))[1])
+    assert np.all(zarr.open_array(str(store_path), mode="r")[:] == data)
+
+
+@pytest.mark.zarr3
+def test_zarr3_block_size_outside_streamable_subset(tmp_path):
+    # the block size ffmpeg writes at 384 kHz, above the streamable subset's 16384
+    data = make_noisy_sin_signals(shape=(2 * 32768 + 100,), dtype="int16")
+    codec = FlacZarr3(blocksize=32768, sample_rate=384000)
+    z = create_array(tmp_path / "big_blocks.zarr", data, chunks=data.shape, codec=codec)
+    z[:] = data
+    assert np.all(zarr.open_array(str(tmp_path / "big_blocks.zarr"), mode="r")[:] == data)
+
+
+@pytest.mark.zarr3
+def test_zarr3_rejects_32_bit_data(tmp_path):
+    data = make_noisy_sin_signals(shape=(BLOCKSIZE, 1), dtype="int16").astype(np.int32) << 12
+    flac_file = tmp_path / "32bit.flac"
+    FlacNumpyEncoder(data, flac_file, blocksize=BLOCKSIZE).process()
+
+    store_path = tmp_path / "int16.zarr"
+    create_array(store_path, data[:, 0].astype(np.int16), chunks=(BLOCKSIZE,), codec=FlacZarr3())
+    write_chunk(store_path, "0", split_header(flac_file.read_bytes())[1])
+
+    with pytest.raises(ValueError, match="decoded to int32"):
         zarr.open_array(str(store_path), mode="r")[:]

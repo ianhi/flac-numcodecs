@@ -9,6 +9,7 @@ Multi-channel data exceeding the number of channels that can be encoded by the c
 compression procedure.
 """
 from pathlib import Path
+import struct
 import threading
 import numpy as np
 
@@ -192,9 +193,50 @@ def _prepare_data(data):
     return data.reshape(-1)[:, None]
 
 
+# the largest sample rate a FLAC stream can record, in STREAMINFO's 20-bit field
+MAX_SAMPLE_RATE = 1048575
+# the largest block size a FLAC stream can record, in STREAMINFO's 16-bit fields
+MAX_BLOCKSIZE = 65535
+
+
 def max_blocksize(sample_rate):
     """The largest block size the FLAC streamable subset allows at `sample_rate`."""
     return Flac.max_blocksizes[0] if sample_rate <= 48000 else Flac.max_blocksizes[1]
+
+
+def _is_streamable(sample_rate, blocksize):
+    # the streamable subset excludes the sample rates a frame header cannot state (frames at
+    # those rates take the rate from STREAMINFO) and block sizes above `max_blocksize`
+    rate_ok = sample_rate <= 65535 or (sample_rate <= 655350 and sample_rate % 10 == 0)
+    return rate_ok and blocksize <= max_blocksize(sample_rate)
+
+
+def _starts_with_frame(buf):
+    # the 15-bit frame sync code, 0b111111111111100
+    return len(buf) >= 2 and buf[0] == 0xFF and buf[1] >> 1 == 0x7C
+
+
+# the bit depths a frame header can state, by their 3-bit code; 0 means "see STREAMINFO"
+_FRAME_BIT_DEPTHS = {1: 8, 2: 12, 4: 16, 5: 20, 6: 24, 7: 32}
+
+
+def _stand_in_streaminfo(bits_per_sample):
+    """`fLaC` signature and a STREAMINFO block for bare frames that take their sample rate
+    from STREAMINFO, which libFLAC does not decode without one.
+
+    The block records a sample rate of 0, which means unknown and does not change the
+    decoded samples, and the bit depth the frames state. Frame headers always state their
+    channels, so the channel count here is a placeholder. The minimum and maximum block
+    sizes differ: when they are equal, libFLAC takes the stream to have that fixed block
+    size and, for frames of any other size, inserts zeros to fill what it takes to be
+    missing frames, without reporting an error.
+    """
+    sample_rate, channels = 0, 1
+    body = struct.pack(">HH", 16, MAX_BLOCKSIZE) + bytes(6)
+    body += ((sample_rate << 44) | ((channels - 1) << 41)
+             | ((bits_per_sample - 1) << 36)).to_bytes(8, "big")
+    # 0x80: the last-metadata-block flag and the STREAMINFO type, then the block's length
+    return b"fLaC" + bytes([0x80, 0, 0, 34]) + body + bytes(16)
 
 
 def encode(data, level=5, blocksize=None, sample_rate=48000, tmpdir=None):
@@ -211,33 +253,31 @@ def encode(data, level=5, blocksize=None, sample_rate=48000, tmpdir=None):
     level : int, optional
         The FLAC compression level (0-8), by default 5
     blocksize : int, optional
-        The block size of the frames, by default None (the number of samples, or 0 to let
-        libFLAC choose when there are 16 samples or fewer). Either way it is capped at the
-        largest block size the FLAC streamable subset allows for `sample_rate`: 4608 up to
-        48 kHz, 16384 above
+        The block size of the frames, from 16 to 65535, by default None: the number of
+        samples, up to the largest block size the FLAC streamable subset allows at
+        `sample_rate` (4608 up to 48 kHz, 16384 above), or 0 to let libFLAC choose when
+        there are 16 samples or fewer
     sample_rate : int, optional
-        The sample rate recorded in the stream, by default 48000
+        The sample rate recorded in the stream, from 1 to 1048575, by default 48000
     tmpdir : str or Path, optional
         The folder where to save tmp flac files, by default None (default temporary folder)
 
     Returns
     -------
     bytes
-        The FLAC stream
+        The FLAC stream. It is in the FLAC streamable subset unless `sample_rate` or
+        `blocksize` is outside it.
     """
     data = _prepare_data(data)
     nsamples = data.shape[0]
-    cap = max_blocksize(sample_rate)
-
     if blocksize is None:
-        blocksize = min(nsamples, cap) if nsamples > 16 else 0
-    else:
-        blocksize = min(blocksize, cap)
+        blocksize = min(nsamples, max_blocksize(sample_rate)) if nsamples > 16 else 0
 
     with TemporaryDirectory(dir=tmpdir) as tmp:
         tmp_file = Path(tmp) / "tmp.flac"
         encoder = FlacNumpyEncoder(data, tmp_file, compression_level=level,
-                                   blocksize=blocksize, sample_rate=sample_rate)
+                                   blocksize=blocksize, sample_rate=sample_rate,
+                                   streamable_subset=_is_streamable(sample_rate, blocksize))
         encoder.process()
         return tmp_file.read_bytes()
 
@@ -248,12 +288,15 @@ def decode(buf, tmpdir=None):
     Bare frames are complete FLAC frames without the file-level metadata that precedes them
     in a FLAC file: the `fLaC` signature and the metadata blocks, including STREAMINFO
     (RFC 9639, section 8). A byte range cut from a FLAC file along frame boundaries holds
-    bare frames. libFLAC decodes them as they are: it synchronises on the first frame, and
-    reads the block size, sample rate, channels and bit depth from each frame header. This
-    holds for frames written at a standard sample rate and bit depth; a frame whose header
-    refers to the missing STREAMINFO block instead cannot be decoded.
+    bare frames. Each frame header states the frame's block size and channels, and usually
+    its sample rate and bit depth. A frame header cannot state a sample rate above 65535 Hz
+    that is not a multiple of 10, or one above 655350 Hz, nor a bit depth other than 8, 12,
+    16, 20, 24 or 32 bits; such frames refer to STREAMINFO instead. Frames that refer to it
+    for their sample rate decode, since the sample rate does not change the decoded samples.
+    Frames that refer to it for their bit depth cannot be decoded, since the bit depth does
+    change them.
 
-    Only 16-bit audio is supported.
+    Only 16-bit and 32-bit audio are supported.
 
     Parameters
     ----------
@@ -265,22 +308,42 @@ def decode(buf, tmpdir=None):
     Returns
     -------
     numpy.ndarray
-        The decoded samples, with shape (n_samples, n_channels)
+        The decoded samples, with shape (n_samples, n_channels), int16 for 16-bit audio and
+        int32 for 32-bit audio
 
     Raises
     ------
     DecoderProcessException
         If libFLAC reports an error: a frame truncated by the end of the buffer, a buffer
         that does not start on a frame boundary, or corrupted data
+    ValueError
+        If `buf` is bare frames that take their bit depth from STREAMINFO
     """
     return _decode_frames(buf, tmpdir)[0]
 
 
 def _decode_frames(buf, tmpdir=None):
-    """`decode`, also returning the (sample rate, block size) of each decoded frame."""
+    """`decode`, also returning the (sample rate, block size) of each decoded frame.
+
+    The sample rate is 0 for a bare frame that takes its sample rate from STREAMINFO.
+    """
+    buf = ensure_contiguous_ndarray(buf).view("u1")
+    stand_in = b""
+    # the frame header codes of the first frame; libFLAC reports anything malformed
+    if _starts_with_frame(buf) and len(buf) >= 4:
+        sample_rate_code = buf[2] & 0x0F
+        bit_depth_code = (buf[3] >> 1) & 0b111
+        if bit_depth_code == 0:
+            raise ValueError("The FLAC frames take their bit depth from the STREAMINFO block "
+                             "of the file they were cut from, which is not included, so they "
+                             "cannot be decoded")
+        if sample_rate_code == 0 and bit_depth_code in _FRAME_BIT_DEPTHS:
+            stand_in = _stand_in_streaminfo(_FRAME_BIT_DEPTHS[bit_depth_code])
     with TemporaryDirectory(dir=tmpdir) as tmp:
         tmp_file = Path(tmp) / "tmp.flac"
-        tmp_file.write_bytes(ensure_contiguous_ndarray(buf))
+        with tmp_file.open("wb") as f:
+            f.write(stand_in)
+            f.write(buf)
         decoder = FlacNumpyDecoder(tmp_file)
         decoder.process()
     return decoder.decoded_data, decoder.frames
@@ -321,7 +384,10 @@ class Flac(Codec):
         self.max_blocksize = max_blocksize(sample_rate)
 
     def encode(self, buf):
-        return encode(buf, level=self.compression_level, blocksize=self.blocksize,
+        blocksize = self.blocksize
+        if blocksize is not None:
+            blocksize = min(blocksize, self.max_blocksize)
+        return encode(buf, level=self.compression_level, blocksize=blocksize,
                       sample_rate=self.sample_rate, tmpdir=self.tmpdir)
 
     def decode(self, buf, out=None):
